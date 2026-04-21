@@ -1,0 +1,23 @@
+[package]
+name = "signal402-protocol"
+version = "0.1.0"
+description = "Signal402 Trust Layer - Verifiable Sports Betting Predictions on Solana"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "signal402_protocol"
+
+[features]
+default = ["cpi"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+
+[dependencies]
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.30.1", features = ["metadata"] }
+solana-program = "~1.18"
+sha2 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false }
