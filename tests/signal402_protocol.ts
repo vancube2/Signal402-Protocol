@@ -560,4 +560,173 @@ describe('Signal402 Protocol', () => {
       expect(prediction.matchId).to.equal(matchId);
     });
   });
+
+  describe('x402 Payment Vault', () => {
+    let vaultPda: anchor.web3.PublicKey;
+    let vaultBump: number;
+
+    before(async () => {
+      // Derive vault PDA for the oracle
+      [vaultPda, vaultBump] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from('payment_vault'), oracleKeypair.publicKey.toBuffer()],
+        program.programId
+      );
+    });
+
+    it('should initialize payment vault', async () => {
+      await program.methods
+        .initializeVault()
+        .accounts({
+          paymentVault: vaultPda,
+          authority: authority.publicKey,
+          oracle: oracleKeypair.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+
+      const vault = await program.account.paymentVault.fetch(vaultPda);
+      expect(vault.oracle.toString()).to.equal(oracleKeypair.publicKey.toString());
+      expect(vault.authority.toString()).to.equal(authority.publicKey.toString());
+      expect(vault.balance.toNumber()).to.equal(0);
+      expect(vault.totalStreamed.toNumber()).to.equal(0);
+      expect(vault.isActive).to.be.true;
+      expect(vault.bump).to.equal(vaultBump);
+    });
+
+    it('should deposit to vault', async () => {
+      const depositAmount = new anchor.BN(100_000_000); // 0.1 SOL
+
+      await program.methods
+        .depositToVault(depositAmount)
+        .accounts({
+          paymentVault: vaultPda,
+          depositor: authority.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+
+      const vault = await program.account.paymentVault.fetch(vaultPda);
+      expect(vault.balance.toNumber()).to.equal(100_000_000);
+    });
+
+    it('should fail to deposit zero amount', async () => {
+      try {
+        await program.methods
+          .depositToVault(new anchor.BN(0))
+          .accounts({
+            paymentVault: vaultPda,
+            depositor: authority.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .rpc();
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.toString()).to.include('InvalidAmount');
+      }
+    });
+
+    it('should stream payment after prediction reveal', async () => {
+      // Create a new prediction for this test
+      const testMatchId = 'match-stream-test';
+      const testPredictionData = 'Stream test prediction';
+      const testNonce = 55555;
+      const timestamp = Math.floor(Date.now() / 1000);
+      const expiry = timestamp + 2;
+
+      const hashInput = Buffer.concat([
+        Buffer.from(testPredictionData),
+        new anchor.BN(testNonce).toBuffer('le', 8),
+        new anchor.BN(timestamp).toBuffer('le', 8),
+      ]);
+      const commitmentHash = createHash('sha256').update(hashInput).digest();
+
+      const [predictionPda] = anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from('prediction'),
+          oracleKeypair.publicKey.toBuffer(),
+          Buffer.from(testMatchId),
+          new anchor.BN(timestamp).toBuffer('le', 8),
+        ],
+        program.programId
+      );
+
+      // Commit prediction
+      await program.methods
+        .commitPrediction(Array.from(commitmentHash), testMatchId, new anchor.BN(expiry))
+        .accounts({
+          prediction: predictionPda,
+          oracle: oracleKeypair.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([oracleKeypair])
+        .rpc();
+
+      // Wait for expiry
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Reveal prediction
+      await program.methods
+        .revealPrediction(testPredictionData, new anchor.BN(testNonce))
+        .accounts({
+          prediction: predictionPda,
+          oracle: oracleKeypair.publicKey,
+        })
+        .signers([oracleKeypair])
+        .rpc();
+
+      // Get vault balance before streaming
+      const vaultBefore = await program.account.paymentVault.fetch(vaultPda);
+      const balanceBefore = vaultBefore.balance.toNumber();
+
+      // Stream payment to oracle
+      const streamAmount = new anchor.BN(10_000_000); // 0.01 SOL
+      await program.methods
+        .streamPayment(streamAmount)
+        .accounts({
+          paymentVault: vaultPda,
+          prediction: predictionPda,
+          recipient: oracleKeypair.publicKey,
+          protocolState: protocolStatePda,
+        })
+        .rpc();
+
+      // Verify vault state updated
+      const vaultAfter = await program.account.paymentVault.fetch(vaultPda);
+      expect(vaultAfter.totalStreamed.toNumber()).to.equal(streamAmount.toNumber());
+      // Balance should decrease by net amount (amount - fee)
+      expect(vaultAfter.balance.toNumber()).to.be.lessThan(balanceBefore);
+    });
+
+    it('should fail to stream to unauthorized recipient', async () => {
+      const unauthorized = anchor.web3.Keypair.generate();
+
+      // Get an existing revealed prediction
+      const existingMatchId = 'match-stream-test';
+      const timestamp = Math.floor(Date.now() / 1000) - 10;
+      const [predictionPda] = anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from('prediction'),
+          oracleKeypair.publicKey.toBuffer(),
+          Buffer.from(existingMatchId),
+          new anchor.BN(timestamp).toBuffer('le', 8),
+        ],
+        program.programId
+      );
+
+      try {
+        await program.methods
+          .streamPayment(new anchor.BN(1_000_000))
+          .accounts({
+            paymentVault: vaultPda,
+            prediction: predictionPda,
+            recipient: unauthorized.publicKey,
+            protocolState: protocolStatePda,
+          })
+          .rpc();
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.toString()).to.include('UnauthorizedRecipient');
+      }
+    });
+  });
 });

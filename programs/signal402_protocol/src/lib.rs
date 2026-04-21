@@ -13,6 +13,10 @@ declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 pub const MAX_COMMITMENT_LEN: usize = 1024;
 /// Prediction expiry window (48 hours)
 pub const PREDICTION_EXPIRY: i64 = 48 * 60 * 60;
+/// Minimum stake for predictions (0.01 SOL = 10_000_000 lamports)
+pub const MINIMUM_STAKE: u64 = 10_000_000;
+/// Platform fee basis points (2.5%)
+pub const PLATFORM_FEE_BPS: u16 = 250;
 
 #[program]
 pub mod signal402_protocol {
@@ -167,6 +171,103 @@ pub mod signal402_protocol {
 
         Ok(is_valid)
     }
+
+    /// Initialize a payment vault for an oracle (x402 integration)
+    pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
+        let vault = &mut ctx.accounts.payment_vault;
+        let oracle = &ctx.accounts.oracle;
+        let authority = &ctx.accounts.authority;
+
+        vault.oracle = oracle.key();
+        vault.authority = authority.key();
+        vault.balance = 0;
+        vault.total_streamed = 0;
+        vault.is_active = true;
+        vault.bump = ctx.bumps.payment_vault;
+
+        emit!(VaultInitialized {
+            oracle: oracle.key(),
+            authority: authority.key(),
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
+    /// Deposit funds into the payment vault
+    pub fn deposit_to_vault(ctx: Context<DepositToVault>, amount: u64) -> Result<()> {
+        let vault = &mut ctx.accounts.payment_vault;
+
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        require!(vault.is_active, ErrorCode::VaultInactive);
+
+        // Transfer lamports from depositor to vault
+        let cpi_context = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer {
+                from: ctx.accounts.depositor.to_account_info(),
+                to: vault.to_account_info(),
+            },
+        );
+        anchor_lang::system_program::transfer(cpi_context, amount)?;
+
+        vault.balance = vault.balance.checked_add(amount).unwrap();
+
+        emit!(VaultDeposit {
+            vault: vault.key(),
+            depositor: ctx.accounts.depositor.key(),
+            amount,
+            new_balance: vault.balance,
+        });
+
+        Ok(())
+    }
+
+    /// Stream payment for a verified prediction (x402 style micropayment)
+    pub fn stream_payment(ctx: Context<StreamPayment>, amount: u64) -> Result<()> {
+        let vault = &mut ctx.accounts.payment_vault;
+        let prediction = &ctx.accounts.prediction;
+        let recipient = &ctx.accounts.recipient;
+
+        require!(vault.is_active, ErrorCode::VaultInactive);
+        require!(prediction.is_revealed, ErrorCode::NotYetRevealed);
+        require!(vault.balance >= amount, ErrorCode::InsufficientFunds);
+        require!(
+            recipient.key() == prediction.oracle || recipient.key() == vault.authority,
+            ErrorCode::UnauthorizedRecipient
+        );
+
+        // Calculate platform fee
+        let fee = amount.checked_mul(PLATFORM_FEE_BPS as u64).unwrap()
+            .checked_div(10000).unwrap();
+        let net_amount = amount.checked_sub(fee).unwrap();
+
+        // Update vault state
+        vault.balance = vault.balance.checked_sub(amount).unwrap();
+        vault.total_streamed = vault.total_streamed.checked_add(amount).unwrap();
+
+        // Transfer net amount to recipient
+        **vault.to_account_info().try_borrow_mut_lamports()? -= net_amount;
+        **recipient.to_account_info().try_borrow_mut_lamports()? += net_amount;
+
+        // Transfer fee to protocol authority
+        if fee > 0 {
+            let protocol_state = &ctx.accounts.protocol_state;
+            // Note: In production, you'd transfer to a dedicated fee vault
+            // For now, we keep the fee in the vault for distribution
+            vault.balance = vault.balance.checked_add(fee).unwrap();
+        }
+
+        emit!(PaymentStreamed {
+            vault: vault.key(),
+            recipient: recipient.key(),
+            amount: net_amount,
+            fee,
+            prediction_match_id: prediction.match_id.clone(),
+        });
+
+        Ok(())
+    }
 }
 
 /// Accounts for committing a prediction
@@ -252,6 +353,77 @@ pub struct VerifyPrediction<'info> {
     pub prediction: Account<'info, Prediction>,
 }
 
+/// Accounts for initializing payment vault
+#[derive(Accounts)]
+pub struct InitializeVault<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + PaymentVault::SIZE,
+        seeds = [b"payment_vault", oracle.key().as_ref()],
+        bump
+    )]
+    pub payment_vault: Account<'info, PaymentVault>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub oracle: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+/// Accounts for depositing to vault
+#[derive(Accounts)]
+pub struct DepositToVault<'info> {
+    #[account(
+        mut,
+        seeds = [b"payment_vault", payment_vault.oracle.as_ref()],
+        bump = payment_vault.bump,
+    )]
+    pub payment_vault: Account<'info, PaymentVault>,
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+/// Accounts for streaming payment
+#[derive(Accounts)]
+pub struct StreamPayment<'info> {
+    #[account(
+        mut,
+        seeds = [b"payment_vault", payment_vault.oracle.as_ref()],
+        bump = payment_vault.bump,
+    )]
+    pub payment_vault: Account<'info, PaymentVault>,
+    #[account(
+        mut,
+        seeds = [
+            b"prediction",
+            prediction.oracle.as_ref(),
+            prediction.match_id.as_bytes(),
+            &prediction.timestamp.to_le_bytes()
+        ],
+        bump = prediction.bump,
+    )]
+    pub prediction: Account<'info, Prediction>,
+    #[account(mut)]
+    pub recipient: SystemAccount<'info>,
+    pub protocol_state: Account<'info, ProtocolState>,
+}
+
+/// Payment vault for x402 micropayments
+#[account]
+pub struct PaymentVault {
+    pub oracle: Pubkey,
+    pub authority: Pubkey,
+    pub balance: u64,
+    pub total_streamed: u64,
+    pub is_active: bool,
+    pub bump: u8,
+}
+
+impl PaymentVault {
+    pub const SIZE: usize = 32 + 32 + 8 + 8 + 1 + 1;
+}
+
 /// Prediction account storing the commitment
 #[account]
 pub struct Prediction {
@@ -301,6 +473,14 @@ pub enum ErrorCode {
     Unauthorized,
     #[msg("Oracle already registered")]
     OracleAlreadyRegistered,
+    #[msg("Invalid amount")]
+    InvalidAmount,
+    #[msg("Payment vault is inactive")]
+    VaultInactive,
+    #[msg("Insufficient funds in vault")]
+    InsufficientFunds,
+    #[msg("Unauthorized recipient")]
+    UnauthorizedRecipient,
 }
 
 /// Events
@@ -339,4 +519,28 @@ pub struct PredictionVerified {
     pub match_id: String,
     pub is_valid: bool,
     pub timestamp: i64,
+}
+
+#[event]
+pub struct VaultInitialized {
+    pub oracle: Pubkey,
+    pub authority: Pubkey,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct VaultDeposit {
+    pub vault: Pubkey,
+    pub depositor: Pubkey,
+    pub amount: u64,
+    pub new_balance: u64,
+}
+
+#[event]
+pub struct PaymentStreamed {
+    pub vault: Pubkey,
+    pub recipient: Pubkey,
+    pub amount: u64,
+    pub fee: u64,
+    pub prediction_match_id: String,
 }

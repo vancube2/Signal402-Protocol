@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "pathPattern": "/api/predictions",
+      "apiPath": "/api/predictions"
+    },
+    {
+      "pathPattern": "/api/predictions/:matchId",
+      "apiPath": "/api/predictions/:matchId"
+    },
+    {
+      "pathPattern": "/api/vault/:oracle",
+      "apiPath": "/api/vault/:oracle"
+    }
+  ]
+}
