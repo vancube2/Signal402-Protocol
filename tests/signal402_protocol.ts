@@ -729,4 +729,167 @@ describe('Signal402 Protocol', () => {
       }
     });
   });
+
+  describe('Oracle Staking', () => {
+    let stakePda: anchor.web3.PublicKey;
+    let stakeBump: number;
+
+    before(async () => {
+      // Derive stake account PDA
+      [stakePda, stakeBump] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from('oracle_stake'), oracleKeypair.publicKey.toBuffer()],
+        program.programId
+      );
+    });
+
+    it('should initialize oracle stake account', async () => {
+      await program.methods
+        .initializeOracleStake()
+        .accounts({
+          stakeAccount: stakePda,
+          oracle: oracleKeypair.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([oracleKeypair])
+        .rpc();
+
+      const stake = await program.account.oracleStake.fetch(stakePda);
+      expect(stake.oracle.toString()).to.equal(oracleKeypair.publicKey.toString());
+      expect(stake.stakedAmount.toNumber()).to.equal(0);
+      expect(stake.totalPredictions.toNumber()).to.equal(0);
+      expect(stake.correctPredictions.toNumber()).to.equal(0);
+      expect(stake.accuracyScore).to.equal(0);
+      expect(stake.isSlashed).to.be.false;
+      expect(stake.slashCount).to.equal(0);
+      expect(stake.bump).to.equal(stakeBump);
+    });
+
+    it('should add stake to oracle account', async () => {
+      const stakeAmount = new anchor.BN(200_000_000); // 0.2 SOL
+
+      await program.methods
+        .addStake(stakeAmount)
+        .accounts({
+          stakeAccount: stakePda,
+          oracle: oracleKeypair.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([oracleKeypair])
+        .rpc();
+
+      const stake = await program.account.oracleStake.fetch(stakePda);
+      expect(stake.stakedAmount.toNumber()).to.equal(200_000_000);
+    });
+
+    it('should fail to add zero stake', async () => {
+      try {
+        await program.methods
+          .addStake(new anchor.BN(0))
+          .accounts({
+            stakeAccount: stakePda,
+            oracle: oracleKeypair.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([oracleKeypair])
+          .rpc();
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.toString()).to.include('InvalidAmount');
+      }
+    });
+
+    it('should update oracle accuracy', async () => {
+      await program.methods
+        .updateOracleAccuracy(true)
+        .accounts({
+          stakeAccount: stakePda,
+          oracle: oracleKeypair.publicKey,
+          protocolState: protocolStatePda,
+          authority: authority.publicKey,
+        })
+        .rpc();
+
+      const stake = await program.account.oracleStake.fetch(stakePda);
+      expect(stake.totalPredictions.toNumber()).to.equal(1);
+      expect(stake.correctPredictions.toNumber()).to.equal(1);
+      expect(stake.accuracyScore).to.equal(10000); // 100% in basis points
+    });
+
+    it('should update accuracy with incorrect prediction', async () => {
+      // First add another correct prediction
+      await program.methods
+        .updateOracleAccuracy(true)
+        .accounts({
+          stakeAccount: stakePda,
+          oracle: oracleKeypair.publicKey,
+          protocolState: protocolStatePda,
+          authority: authority.publicKey,
+        })
+        .rpc();
+
+      // Now add an incorrect prediction
+      await program.methods
+        .updateOracleAccuracy(false)
+        .accounts({
+          stakeAccount: stakePda,
+          oracle: oracleKeypair.publicKey,
+          protocolState: protocolStatePda,
+          authority: authority.publicKey,
+        })
+        .rpc();
+
+      const stake = await program.account.oracleStake.fetch(stakePda);
+      expect(stake.totalPredictions.toNumber()).to.equal(3);
+      expect(stake.correctPredictions.toNumber()).to.equal(2);
+      expect(stake.accuracyScore).to.equal(6666); // 2/3 = 66.66%
+    });
+
+    it('should remove stake partially', async () => {
+      const removeAmount = new anchor.BN(50_000_000); // 0.05 SOL
+
+      await program.methods
+        .removeStake(removeAmount)
+        .accounts({
+          stakeAccount: stakePda,
+          oracle: oracleKeypair.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([oracleKeypair])
+        .rpc();
+
+      const stake = await program.account.oracleStake.fetch(stakePda);
+      expect(stake.stakedAmount.toNumber()).to.equal(150_000_000); // 0.2 - 0.05 = 0.15 SOL
+    });
+
+    it('should fail to slash oracle stake (unauthorized)', async () => {
+      const unauthorizedKeypair = anchor.web3.Keypair.generate();
+
+      // Get a prediction for this oracle
+      const [predictionPda] = anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from('prediction'),
+          oracleKeypair.publicKey.toBuffer(),
+          Buffer.from('match-stream-test'),
+          new anchor.BN(Math.floor(Date.now() / 1000) - 10).toBuffer('le', 8),
+        ],
+        program.programId
+      );
+
+      try {
+        await program.methods
+          .slashOracle(new anchor.BN(10_000_000))
+          .accounts({
+            stakeAccount: stakePda,
+            protocolState: protocolStatePda,
+            prediction: predictionPda,
+            authority: unauthorizedKeypair.publicKey,
+          })
+          .signers([unauthorizedKeypair])
+          .rpc();
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error.toString()).to.include('Unauthorized');
+      }
+    });
+  });
 });
