@@ -1,0 +1,47 @@
+═══════════════════════════════════════════════════════════════
+                  🚀 Signal402 Protocol 🚀
+═══════════════════════════════════════════════════════════════
+
+Welcome to your pre-configured Solana development environment!
+
+Your environment includes:
+  ✅ Rust (latest stable)
+  ✅ Solana CLI v1.18.17
+  ✅ Anchor CLI v0.30.1
+  ✅ Node.js 20
+  ✅ All project dependencies
+
+Quick Commands:
+─────────────
+  anchor build        - Build the smart contract
+  anchor test         - Run the test suite
+  anchor deploy       - Deploy to localnet
+  solana --version    - Check Solana CLI version
+  anchor --version    - Check Anchor version
+
+Project Structure:
+──────────────────
+  programs/           - Rust smart contract
+  tests/             - TypeScript tests
+  blinks/            - Solana Blinks integration
+  frontend/          - React frontend app
+
+Getting Started:
+────────────────
+1. Build the project:
+   $ anchor build
+
+2. Run tests:
+   $ anchor test
+
+3. Start developing! The code is in:
+   - programs/signal402_protocol/src/lib.rs
+   - tests/signal402_protocol.ts
+
+Need help?
+──────────
+- Check README.md for full documentation
+- Open an issue on GitHub
+
+Happy coding! 🎉
+═══════════════════════════════════════════════════════════════

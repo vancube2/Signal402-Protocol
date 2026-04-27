@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  SOLANA_CLI_VERSION: 1.18.17
+  ANCHOR_VERSION: 0.30.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Cache Solana CLI
+      uses: actions/cache@v4
+      id: cache-solana
+      with:
+        path: |
+          ~/.local/share/solana
+        key: solana-${{ env.SOLANA_CLI_VERSION }}
+
+    - name: Install Solana CLI
+      if: steps.cache-solana.outputs.cache-hit != 'true'
+      run: |
+        curl -sSfL https://release.solana.com/v${{ env.SOLANA_CLI_VERSION }}/install | sh
+
+    - name: Add Solana to PATH
+      run: |
+        echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+    - name: Verify Solana Installation
+      run: |
+        solana --version
+        cargo build-sbf --version
+
+    - name: Cache Anchor CLI
+      uses: actions/cache@v4
+      id: cache-anchor
+      with:
+        path: |
+          ~/.cargo/bin/anchor
+          ~/.cargo/git/checkouts/anchor-*
+        key: anchor-${{ env.ANCHOR_VERSION }}
+
+    - name: Install Anchor CLI
+      if: steps.cache-anchor.outputs.cache-hit != 'true'
+      run: |
+        cargo install --git https://github.com/coral-xyz/anchor --tag v${{ env.ANCHOR_VERSION }} anchor-cli
+
+    - name: Verify Anchor Installation
+      run: |
+        anchor --version
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'yarn'
+
+    - name: Install Node Dependencies
+      run: yarn install
+
+    - name: Generate Solana Keypair
+      run: |
+        mkdir -p ~/.config/solana
+        solana-keygen new --no-passphrase --silent -o ~/.config/solana/id.json
+
+    - name: Set Solana Config
+      run: |
+        solana config set --url localnet
+
+    - name: Build Smart Contract
+      run: |
+        anchor build
+
+    - name: Run Tests
+      run: |
+        anchor test
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: build-artifacts
+        path: |
+          target/
+          Cargo.lock
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Run Rustfmt
+      run: |
+        cargo fmt -- --check
+      working-directory: ./programs/signal402_protocol
+
+    - name: Run Clippy
+      run: |
+        cargo clippy -- -D warnings
+      working-directory: ./programs/signal402_protocol
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: frontend/signal402-app/package-lock.json
+
+    - name: Install Frontend Dependencies
+      run: |
+        cd frontend/signal402-app
+        npm install
+
+    - name: Build Frontend
+      run: |
+        cd frontend/signal402-app
+        npm run build
+      continue-on-error: true
