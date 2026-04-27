@@ -3,31 +3,29 @@ set -e
 
 echo "🚀 Setting up Signal402 Protocol Development Environment..."
 
-# Install Solana CLI
-echo "📦 Installing Solana CLI..."
-curl -sSfL https://release.solana.com/v1.18.17/install | sh
-export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+# PATH is already set in Dockerfile, but ensure it's available
+export PATH="/root/.local/share/solana/install/active_release/bin:/root/.cargo/bin:$PATH"
 
-# Verify Solana installation
+# Verify installations
+echo "✅ Verifying installations..."
 solana --version
-
-# Install Anchor CLI
-echo "⚓ Installing Anchor CLI..."
-cargo install --git https://github.com/coral-xyz/anchor --tag v0.30.1 anchor-cli
-
-# Verify Anchor installation
 anchor --version
+node --version
 
 # Install Node.js dependencies
 echo "📦 Installing Node.js dependencies..."
-npm install -g yarn
-yarn install
+cd /workspace
+if [ -f "yarn.lock" ]; then
+    yarn install
+else
+    npm install
+fi
 
 # Generate Solana keypair for testing
 mkdir -p ~/.config/solana
 if [ ! -f ~/.config/solana/id.json ]; then
     echo "🔑 Generating Solana keypair..."
-    solana-keygen new --no-passphrase -o ~/.config/solana/id.json
+    solana-keygen new --no-passphrase --silent -o ~/.config/solana/id.json
 fi
 
 # Set Solana config to localnet

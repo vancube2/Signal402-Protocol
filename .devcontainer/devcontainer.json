@@ -27,6 +27,9 @@
       }
     }
   },
+  "remoteEnv": {
+    "PATH": "/root/.local/share/solana/install/active_release/bin:/root/.cargo/bin:${containerEnv:PATH}"
+  },
   "postCreateCommand": "bash .devcontainer/setup.sh",
   "postStartCommand": "solana --version && anchor --version",
   "forwardPorts": [8899, 8900, 3000, 3001],
